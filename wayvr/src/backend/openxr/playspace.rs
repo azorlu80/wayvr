@@ -1,4 +1,4 @@
-use glam::{Affine3A, Quat, Vec3, Vec3A, vec3a};
+use glam::{Affine3A, Mat3A, Quat, Vec3, Vec3A, vec3a};
 use libmonado::{Monado, Pose, ReferenceSpaceType};
 use wgui::log::LogErr;
 
@@ -93,11 +93,13 @@ impl PlayspaceMover {
                 return;
             }
 
-            let pose_quat = Quat::from_affine3(&data.pose);
-            let new_hand =
-                pose_quat * Quat::from_affine3(&app.input_state.pointers[data.hand].raw_pose);
+            let pose_quat = Quat::from_affine3(&data.pose).normalize();
+            let new_hand = (pose_quat
+                * Quat::from_affine3(&app.input_state.pointers[data.hand].raw_pose))
+            .normalize();
 
-            let dq = pose_quat.conjugate() * (new_hand * data.hand_pose.conjugate()) * pose_quat;
+            let dq = (pose_quat.conjugate() * (new_hand * data.hand_pose.conjugate()) * pose_quat)
+                .normalize();
             let mut space_transform = if app.session.config.space_rotate_unlocked {
                 Affine3A::from_quat(dq)
             } else {
@@ -116,6 +118,7 @@ impl PlayspaceMover {
 
             let before_pose = data.pose;
             data.pose *= space_transform;
+            data.pose.matrix3 = Mat3A::from_quat(Quat::from_affine3(&data.pose).normalize());
             if !app.session.config.space_drag_affects_world {
                 playspace_common::shift_world(overlays, &mut app.anchor, &before_pose, &data.pose);
             }
@@ -141,7 +144,7 @@ impl PlayspaceMover {
                         return;
                     };
 
-                    let hand_pose = Quat::from_affine3(&(pose * pointer.raw_pose));
+                    let hand_pose = Quat::from_affine3(&(pose * pointer.raw_pose)).normalize();
                     self.rotate = Some(MoverData {
                         pose,
                         hand: i,
