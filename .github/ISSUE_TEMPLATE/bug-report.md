@@ -9,7 +9,10 @@ assignees: ''
 
 ## Description
 <!-- 
-If this is a regression, please mention which version was working previously.
+*** Do NOT use AI to generate a bug report! ***
+Simply write down what's wrong and maybe provide screenshots or a video.
+
+If this has worked before, please mention which version was last working.
 -->
 
 ## System Info
