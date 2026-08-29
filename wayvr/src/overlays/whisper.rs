@@ -301,7 +301,9 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                         }
 
                         if state.set_clipboard_text(app) {
-                            // send ctrl-v
+                            // FORK patch: send Ctrl+Shift+V (terminals/Konsole need it; plain Ctrl+V
+                            // does not paste in a terminal). Sequence: Ctrl down, Shift down,
+                            // V down, V up, Shift up, Ctrl up.
                             app.hid_provider.send_key_routed(
                                 app.wvr_server.as_mut(),
                                 VirtualKey::RCtrl,
@@ -309,12 +311,22 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                             );
                             app.hid_provider.send_key_routed(
                                 app.wvr_server.as_mut(),
+                                VirtualKey::LShift,
+                                true,
+                            );
+                            app.hid_provider.send_key_routed(
+                                app.wvr_server.as_mut(),
                                 VirtualKey::V,
                                 true,
                             );
                             app.hid_provider.send_key_routed(
                                 app.wvr_server.as_mut(),
                                 VirtualKey::V,
+                                false,
+                            );
+                            app.hid_provider.send_key_routed(
+                                app.wvr_server.as_mut(),
+                                VirtualKey::LShift,
                                 false,
                             );
                             app.hid_provider.send_key_routed(
