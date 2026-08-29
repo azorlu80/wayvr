@@ -290,7 +290,7 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
 
                         Ok(EventResult::Consumed)
                     }),
-                    "::WhisperTranscribeStop" => Box::new(move |_common, data, app, _state| {
+                    "::WhisperTranscribeStop" => Box::new(move |common, data, app, state| {
                         if !test_button(data) || !test_duration(&button, app) {
                             return Ok(EventResult::Pass);
                         }
@@ -303,6 +303,10 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                         } else {
                             log::debug!(target: "whisper", "[7!] release but whisper_sst=None");
                         }
+
+                        // Recording ended: stop the live VU meter / progress UI here,
+                        // not on the first partial (which would tear it down mid-speech).
+                        reset_progress_state(common, state);
 
                         Ok(EventResult::Consumed)
                     }),
@@ -459,7 +463,6 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                 && let Some(text) = whisper_stt.take_transcription()
             {
                 log::debug!(target: "whisper", "[13] panel <- transcription ({} chars): {text:?}", text.len());
-                reset_progress_state(common, state);
 
                 let text: Rc<str> = text.into();
                 state.last_transcription = Some(text.clone());
