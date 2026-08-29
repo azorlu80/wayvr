@@ -110,8 +110,11 @@ pub struct WhisperStt {
     finished_recognizers: Vec<JoinHandle<()>>,
     finished_captures: Vec<JoinHandle<()>>,
 
-    completed_rx: mpsc::Receiver<Result<String, String>>,
-    completed_tx: mpsc::Sender<Result<String, String>>,
+    // Receiver for the CURRENT session only. A fresh channel is created per
+    // ptt_start; a detached/stale recognizer from a previous session holds the
+    // old Sender, so its late final decode lands in a dropped channel instead of
+    // corrupting the new session's panel.
+    completed_rx: Option<mpsc::Receiver<Result<String, String>>>,
 
     last_error: Option<String>,
     unload_at: Instant,
@@ -139,8 +142,6 @@ impl WhisperStt {
         let ctx = WhisperContext::new_with_params(&config.model_path, ctx_params)
             .map_err(|e| WhisperSttError::ModelLoad(e.to_string()))?;
 
-        let (completed_tx, completed_rx) = mpsc::channel();
-
         static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         log::debug!(target: "whisper", "[2] CREATE WhisperStt #{id} (model loaded)");
@@ -152,8 +153,7 @@ impl WhisperStt {
             active: None,
             finished_recognizers: Vec::new(),
             finished_captures: Vec::new(),
-            completed_rx,
-            completed_tx,
+            completed_rx: None,
             last_error: None,
             unload_at: Instant::now() + UNLOAD_AFTER,
         })
@@ -174,13 +174,17 @@ impl WhisperStt {
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         let (stop_tx, stop_rx) = mpsc::channel::<StopCapture>();
         let (progress_tx, progress_rx) = mpsc::channel::<PttProgress>();
+        // Fresh transcription channel per session: this recognizer is the only
+        // producer for this receiver. A stale recognizer from an earlier session
+        // keeps its own (now orphaned) sender and cannot reach this session.
+        let (completed_tx, completed_rx) = mpsc::channel::<Result<String, String>>();
 
         let recognizer_thread = spawn_recognizer_thread(
             self.id,
             Arc::clone(&self.ctx),
             self.config.clone(),
             audio_rx,
-            self.completed_tx.clone(),
+            completed_tx,
             progress_tx.clone(),
         )?;
 
@@ -198,6 +202,9 @@ impl WhisperStt {
         // the UI thread, so an unbounded recv() would freeze the whole overlay.
         match ready_rx.recv_timeout(READY_TIMEOUT) {
             Ok(Ok(())) => {
+                // Switch the panel to listen on this session's channel. The old
+                // receiver (if any) drops here, discarding any stale in-flight text.
+                self.completed_rx = Some(completed_rx);
                 self.active = Some(CaptureSession {
                     stop_tx,
                     capture_thread: Some(capture_thread),
@@ -249,9 +256,17 @@ impl WhisperStt {
     }
 
     fn drain_completed_transcriptions(&mut self) -> Option<String> {
-        let mut latest = None;
+        let Some(rx) = self.completed_rx.as_ref() else {
+            return None;
+        };
 
-        while let Ok(result) = self.completed_rx.try_recv() {
+        let mut latest = None;
+        let mut count = 0;
+        let mut error = None;
+
+        while let Ok(result) = rx.try_recv() {
+            count += 1;
+            log::debug!(target: "whisper", "[12-recv] #{} drained msg: {result:?}", self.id);
             match result {
                 Ok(text) => {
                     let text = normalize_transcript(text);
@@ -260,9 +275,16 @@ impl WhisperStt {
                     }
                 }
                 Err(e) => {
-                    self.last_error = Some(e);
+                    error = Some(e);
                 }
             }
+        }
+
+        if let Some(e) = error {
+            self.last_error = Some(e);
+        }
+        if count > 0 {
+            log::debug!(target: "whisper", "[12-drain] #{} drained {count} msg(s), latest={latest:?}", self.id);
         }
 
         latest
