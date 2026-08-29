@@ -387,6 +387,25 @@ fn transcribe_audio(
     config: &WhisperSttConfig,
     audio: &[f32],
 ) -> Result<String, WhisperSttError> {
+    // FORK DEBUG: log captured audio stats (INPUT to whisper)
+    {
+        let n = audio.len();
+        let peak = audio.iter().fold(0f32, |m, &s| m.max(s.abs()));
+        let rms = if n > 0 {
+            (audio.iter().map(|&s| s * s).sum::<f32>() / n as f32).sqrt()
+        } else {
+            0.0
+        };
+        eprintln!(
+            "[WHISPER-DBG] IN  samples={} dur={:.2}s peak={:.4} rms={:.4} lang={:?}{}",
+            n,
+            n as f32 / 16000.0,
+            peak,
+            rms,
+            config.language,
+            if peak < 0.01 { "  <-- SILENT INPUT" } else { "" }
+        );
+    }
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
     params.set_n_threads(config.n_threads);
@@ -414,7 +433,10 @@ fn transcribe_audio(
         .map(|segment| segment.to_string())
         .collect::<String>();
 
-    Ok(normalize_transcript(text))
+    // FORK DEBUG: log raw + normalized transcript (OUTPUT from whisper)
+    let normalized = normalize_transcript(text.clone());
+    eprintln!("[WHISPER-DBG] OUT raw={:?} normalized={:?}", text, normalized);
+    Ok(normalized)
 }
 
 fn rodio_capture_thread(
@@ -497,6 +519,12 @@ fn run_rodio_capture(
 
     let channels = mic.channels().get() as usize;
     let input_rate = mic.sample_rate().get() as usize;
+
+    // FORK DEBUG: log the actual capture device rodio/cpal opened
+    eprintln!(
+        "[WHISPER-DBG] CAPTURE opened: channels={} rate={} requested_device={:?}",
+        channels, input_rate, input_device_name
+    );
 
     if let Some(ready_tx) = ready_tx.take() {
         let _ = ready_tx.send(Ok(()));
