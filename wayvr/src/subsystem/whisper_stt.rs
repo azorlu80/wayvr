@@ -96,6 +96,7 @@ struct CaptureSession {
 }
 
 pub struct WhisperStt {
+    id: usize,
     config: WhisperSttConfig,
     ctx: Arc<WhisperContext>,
 
@@ -137,7 +138,12 @@ impl WhisperStt {
 
         let (completed_tx, completed_rx) = mpsc::channel();
 
+        static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        log::debug!(target: "whisper", "[2] CREATE WhisperStt #{id} (model loaded)");
+
         Ok(Self {
+            id,
             config,
             ctx: Arc::new(ctx),
             active: None,
@@ -152,10 +158,12 @@ impl WhisperStt {
 
     /// starts a fresh capture stream and a transcription worker
     pub fn ptt_start(&mut self) -> Result<mpsc::Receiver<PttProgress>, WhisperSttError> {
+        log::debug!(target: "whisper", "[3] ptt_start #{}", self.id);
         self.unload_at = Instant::now() + UNLOAD_AFTER;
         self.reap_finished_threads();
 
         if self.active.is_some() {
+            log::debug!(target: "whisper", "[3!] ptt_start #{} REJECTED: already recording", self.id);
             return Err(WhisperSttError::AlreadyRecording);
         }
 
@@ -165,6 +173,7 @@ impl WhisperStt {
         let (progress_tx, progress_rx) = mpsc::channel::<PttProgress>();
 
         let recognizer_thread = spawn_recognizer_thread(
+            self.id,
             Arc::clone(&self.ctx),
             self.config.clone(),
             audio_rx,
@@ -262,7 +271,8 @@ impl WhisperStt {
 
         let latest = self.drain_completed_transcriptions();
 
-        if latest.is_some() {
+        if let Some(text) = &latest {
+            log::debug!(target: "whisper", "[12] #{} take_transcription -> Some ({} chars)", self.id, text.len());
             self.unload_at = Instant::now() + UNLOAD_AFTER;
             return latest;
         }
@@ -282,6 +292,10 @@ impl WhisperStt {
 
     pub fn should_unload(&self) -> bool {
         self.unload_at < Instant::now()
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
     }
 
     /// Join any capture/recognizer threads that have already finished. Only
@@ -316,6 +330,7 @@ impl Drop for WhisperStt {
 }
 
 fn spawn_recognizer_thread(
+    id: usize,
     ctx: Arc<WhisperContext>,
     config: WhisperSttConfig,
     audio_rx: mpsc::Receiver<Vec<f32>>,
@@ -325,18 +340,20 @@ fn spawn_recognizer_thread(
     thread::Builder::new()
         .name("whisper-stt-recognizer".to_string())
         .spawn(move || {
-            recognizer_thread(ctx, config, audio_rx, completed_tx, progress_tx);
+            recognizer_thread(id, ctx, config, audio_rx, completed_tx, progress_tx);
         })
         .map_err(|e| WhisperSttError::ThreadSpawn(e.to_string()))
 }
 
 fn recognizer_thread(
+    id: usize,
     ctx: Arc<WhisperContext>,
     config: WhisperSttConfig,
     audio_rx: mpsc::Receiver<Vec<f32>>,
     completed_tx: mpsc::Sender<Result<String, String>>,
     progress_tx: mpsc::Sender<PttProgress>,
 ) {
+    log::debug!(target: "whisper", "[5] recognizer #{id} started");
     let partial_stride_samples =
         ms_to_samples(config.partial_decode_interval_ms).max(WHISPER_SAMPLE_RATE / 4);
     let min_samples = ms_to_samples(config.min_audio_ms);
@@ -366,7 +383,7 @@ fn recognizer_thread(
                 // fast taps yield audio.len=0). Streaming partials makes the panel fill
                 // word-by-word as the user speaks and survives a hung final decode.
                 if !text.trim().is_empty() {
-                    log::debug!(target: "whisper", "stream partial ({} chars)", text.len());
+                    log::debug!(target: "whisper", "[6] #{id} stream partial ({} chars) -> completed_tx", text.len());
                     let _ = completed_tx.send(Ok(text.clone()));
                 }
                 latest_partial = text;
@@ -380,21 +397,31 @@ fn recognizer_thread(
 
     // Capture stopped (PTT released or deadline hit). Run one final decode over
     // the whole utterance for best quality; it supersedes the streamed partials.
+    log::debug!(
+        target: "whisper",
+        "[9] #{id} recognizer loop EXIT (audio {:.2}s, min {:.2}s)",
+        audio.len() as f32 / WHISPER_SAMPLE_RATE as f32,
+        min_samples as f32 / WHISPER_SAMPLE_RATE as f32
+    );
     if audio.len() < min_samples {
+        log::debug!(target: "whisper", "[10-empty] #{id} audio too short -> send empty");
         let _ = completed_tx.send(Ok(String::new()));
         return;
     }
 
     match transcribe_audio(&ctx, &config, &audio) {
         Ok(text) => {
+            log::debug!(target: "whisper", "[10] #{id} FINAL decode ({} chars) -> completed_tx", text.len());
             let _ = completed_tx.send(Ok(text));
         }
         Err(e) if !latest_partial.trim().is_empty() => {
             // Prefer a recent partial over losing the utterance completely.
+            log::debug!(target: "whisper", "[10-partial] #{id} final failed, send latest partial: {e}");
             let _ = completed_tx.send(Ok(latest_partial));
             let _ = completed_tx.send(Err(e.to_string()));
         }
         Err(e) => {
+            log::debug!(target: "whisper", "[10-err] #{id} final decode error: {e}");
             let _ = completed_tx.send(Err(e.to_string()));
         }
     }

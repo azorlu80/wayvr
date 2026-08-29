@@ -277,7 +277,7 @@ impl AppState {
                 .as_ref()
                 .is_some_and(WhisperStt::should_unload)
             {
-                log::info!("Unloading Whisper model due to timeout");
+                log::debug!(target: "whisper", "[14] AUTO-UNLOAD whisper_sst=None (idle timeout)");
                 self.whisper_sst = None;
             }
         }

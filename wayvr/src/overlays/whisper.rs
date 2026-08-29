@@ -222,8 +222,10 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                         if !test_button(data) || !test_duration(&button, app) {
                             return Ok(EventResult::Pass);
                         }
+                        log::debug!(target: "whisper", "[1] WhisperTranscribeStart (button press)");
 
                         let whisper = if let Some(x) = app.whisper_sst.as_mut() {
+                            log::debug!(target: "whisper", "[2b] REUSE existing whisper_sst #{}", x.id());
                             x
                         } else {
                             let model_path = data_dir::get_path("whisper")
@@ -277,11 +279,14 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                         if !test_button(data) || !test_duration(&button, app) {
                             return Ok(EventResult::Pass);
                         }
+                        log::debug!(target: "whisper", "[7] WhisperTranscribeStop (button release)");
 
                         if let Some(whisper) = app.whisper_sst.as_mut() {
                             let _ = whisper
                                 .ptt_end()
                                 .log_err("Could not stop Whisper transcription");
+                        } else {
+                            log::debug!(target: "whisper", "[7!] release but whisper_sst=None");
                         }
 
                         Ok(EventResult::Consumed)
@@ -363,6 +368,7 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                         if !test_button(data) || !test_duration(&button, app) {
                             return Ok(EventResult::Pass);
                         }
+                        log::debug!(target: "whisper", "[15] WhisperUnloadAndClose (X button) -> whisper_sst=None");
 
                         app.whisper_sst = None;
                         app.tasks
@@ -418,10 +424,25 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
 
     let on_label_tick: EventCallback<AppState, WhisperState> =
         Box::new(move |common, data, app, state| {
+            {
+                // [11] proves the panel's render-driven tick is alive and shows
+                // which whisper instance (if any) it is polling. Throttled so the
+                // 100 ms tick does not flood the log.
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static TICKS: AtomicUsize = AtomicUsize::new(0);
+                let n = TICKS.fetch_add(1, Ordering::Relaxed);
+                if n % 20 == 0 {
+                    log::debug!(
+                        target: "whisper",
+                        "[11] on_label_tick alive #{n} whisper_sst={:?}",
+                        app.whisper_sst.as_ref().map(WhisperStt::id)
+                    );
+                }
+            }
             if let Some(whisper_stt) = app.whisper_sst.as_mut()
                 && let Some(text) = whisper_stt.take_transcription()
             {
-                log::debug!(target: "whisper", "panel <- transcription ({} chars)", text.len());
+                log::debug!(target: "whisper", "[13] panel <- transcription ({} chars): {text:?}", text.len());
                 reset_progress_state(common, state);
 
                 let text: Rc<str> = text.into();
