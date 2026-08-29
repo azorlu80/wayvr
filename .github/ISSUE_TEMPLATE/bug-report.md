@@ -11,7 +11,6 @@ assignees: ''
 <!-- 
 *** Do NOT use AI to generate a bug report! ***
 Simply write down what's wrong and maybe provide screenshots or a video.
-
 If this has worked before, please mention which version was last working.
 -->
 
