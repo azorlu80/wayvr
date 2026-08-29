@@ -651,3 +651,74 @@ const fn ms_to_samples(ms: u64) -> usize {
 fn normalize_transcript(text: String) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ms_to_samples_converts_at_16khz() {
+        assert_eq!(ms_to_samples(0), 0);
+        assert_eq!(ms_to_samples(1000), 16_000);
+        assert_eq!(ms_to_samples(250), 4_000); // min_audio default
+        assert_eq!(ms_to_samples(700), 11_200); // partial stride default
+    }
+
+    #[test]
+    fn normalize_transcript_collapses_whitespace() {
+        assert_eq!(
+            normalize_transcript("  Merhaba   ben  Ali. ".to_string()),
+            "Merhaba ben Ali."
+        );
+        assert_eq!(normalize_transcript("\n\ttek\n".to_string()), "tek");
+        assert_eq!(normalize_transcript(String::new()), "");
+        assert_eq!(normalize_transcript("   ".to_string()), "");
+    }
+
+    #[test]
+    fn resampler_rejects_degenerate_input() {
+        let mut r = StreamingResampler::default();
+        assert!(r.push_interleaved_mono_16k(&[0.1, 0.2], 0, 16_000).is_empty());
+        assert!(r.push_interleaved_mono_16k(&[0.1, 0.2], 1, 0).is_empty());
+    }
+
+    #[test]
+    fn resampler_passthrough_16khz_mono() {
+        let mut r = StreamingResampler::default();
+        let input: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+        let out = r.push_interleaved_mono_16k(&input, 1, 16_000);
+        // step == 1.0 at 16 kHz mono -> ~one output sample per input sample.
+        assert!((out.len() as i64 - 1000).abs() <= 3, "got {}", out.len());
+        assert!((out[0] - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn resampler_averages_stereo_to_mono() {
+        let mut r = StreamingResampler::default();
+        // 4 stereo frames, L=1.0 R=3.0 -> each mono sample should be 2.0.
+        let input = [1.0, 3.0, 1.0, 3.0, 1.0, 3.0, 1.0, 3.0];
+        let out = r.push_interleaved_mono_16k(&input, 2, 16_000);
+        assert!(!out.is_empty());
+        for s in out {
+            assert!((s - 2.0).abs() < 1e-3, "expected mono avg 2.0, got {s}");
+        }
+    }
+
+    #[test]
+    fn resampler_downsamples_48k_to_16k() {
+        let mut r = StreamingResampler::default();
+        let input: Vec<f32> = (0..480).map(|i| (i % 2) as f32).collect(); // 480 mono @ 48 kHz
+        let out = r.push_interleaved_mono_16k(&input, 1, 48_000);
+        // 48 kHz -> 16 kHz is a 1/3 ratio, so expect ~160 samples.
+        assert!((out.len() as i64 - 160).abs() <= 3, "got {}", out.len());
+    }
+
+    #[test]
+    fn resampler_resets_state_on_rate_change() {
+        let mut r = StreamingResampler::default();
+        let _ = r.push_interleaved_mono_16k(&[0.5; 100], 1, 44_100);
+        // A new input rate must clear stale pending samples, not blend across rates.
+        let out = r.push_interleaved_mono_16k(&[0.0; 480], 1, 48_000);
+        assert!((out.len() as i64 - 160).abs() <= 3, "got {}", out.len());
+    }
+}
