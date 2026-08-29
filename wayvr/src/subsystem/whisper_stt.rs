@@ -44,7 +44,9 @@ impl WhisperSttConfig {
 
         Self {
             model_path: model_path.as_ref().to_path_buf(),
-            language: None,
+            // Fork patch: read whisper language from WAYVR_WHISPER_LANG env var
+            // (e.g. "tr" for Turkish). Unset/empty => None => auto-detect (upstream default).
+            language: std::env::var("WAYVR_WHISPER_LANG").ok().filter(|s| !s.is_empty()),
             initial_prompt: None,
             n_threads,
             partial_decode_interval_ms: 700,
