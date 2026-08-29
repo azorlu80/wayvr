@@ -52,6 +52,7 @@ struct WhisperState {
     last_transcription: Option<Rc<str>>,
     id_rect_vu_meter: WidgetID,
     id_label_progress: WidgetID,
+    id_label_transcription: WidgetID,
 }
 
 impl WhisperState {
@@ -193,6 +194,7 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
         last_transcription: None,
         id_rect_vu_meter: Default::default(),
         id_label_progress: Default::default(),
+        id_label_transcription: Default::default(),
     };
     let xml = "gui/whisper.xml";
 
@@ -268,6 +270,19 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
 
                         match whisper.ptt_start() {
                             Ok(progress_rx) => {
+                                // Clear the panel so each press starts fresh and the
+                                // previous utterance never lingers under the new one.
+                                state.last_transcription = None;
+                                if let Some(mut label) = common
+                                    .state
+                                    .widgets
+                                    .get_as::<WidgetLabel>(state.id_label_transcription)
+                                {
+                                    label.set_text(
+                                        common,
+                                        Translation::from_raw_text_string(String::new()),
+                                    );
+                                }
                                 start_progress_state(common, state, progress_rx);
                             }
                             Err(e) => log::error!("Could not start Whisper transcription: {e:?}"),
@@ -399,6 +414,7 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
         BackendAttribValue::Icon("icons/mic.svg".into()),
     );
     let id_label_transcription = panel.parser_state.get_widget_id("transcription")?;
+    panel.state.id_label_transcription = id_label_transcription;
     panel.state.id_label_progress = panel.parser_state.get_widget_id("label_progress")?;
     panel.state.id_rect_vu_meter = panel.parser_state.get_widget_id("rect_vu_meter")?;
 
