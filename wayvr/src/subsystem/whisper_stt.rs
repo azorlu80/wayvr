@@ -635,9 +635,11 @@ fn run_rodio_capture(
         let resampled_vec = resampler.push_interleaved_mono_16k(&interleaved, channels, input_rate);
 
         if !resampled_vec.is_empty() {
+            // Absolute value: audio swings negative too, so a signed max would
+            // under-report level and misread the meter/clipping.
             let mut loudest_sample: f32 = 0.0;
             for sample in &resampled_vec {
-                loudest_sample = loudest_sample.max(*sample);
+                loudest_sample = loudest_sample.max(sample.abs());
             }
 
             let _ = progress_tx.send(PttProgress::VuVolume(loudest_sample));
@@ -741,8 +743,8 @@ mod tests {
     fn ms_to_samples_converts_at_16khz() {
         assert_eq!(ms_to_samples(0), 0);
         assert_eq!(ms_to_samples(1000), 16_000);
-        assert_eq!(ms_to_samples(250), 4_000); // min_audio default
-        assert_eq!(ms_to_samples(700), 11_200); // partial stride default
+        assert_eq!(ms_to_samples(250), 4_000); // min_audio_ms default
+        assert_eq!(ms_to_samples(400), 6_400); // partial_decode_interval_ms default
     }
 
     #[test]
