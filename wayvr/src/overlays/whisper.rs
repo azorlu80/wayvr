@@ -421,6 +421,7 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
             if let Some(whisper_stt) = app.whisper_sst.as_mut()
                 && let Some(text) = whisper_stt.take_transcription()
             {
+                log::debug!(target: "whisper", "panel <- transcription ({} chars)", text.len());
                 reset_progress_state(common, state);
 
                 let text: Rc<str> = text.into();

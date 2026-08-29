@@ -360,6 +360,15 @@ fn recognizer_thread(
             let _ = progress_tx.send(PttProgress::ProcessedSamples(processed_samples));
             processed_samples += (audio.len() - last_decoded_len) as u32;
             if let Ok(text) = transcribe_audio(&ctx, &config, &audio) {
+                // FORK: stream each partial so take_transcription() gets live text
+                // without depending on a clean PTT stop -> loop-exit -> final decode.
+                // That chain is fragile (mic.next() can block, the loop may not exit,
+                // fast taps yield audio.len=0). Streaming partials makes the panel fill
+                // word-by-word as the user speaks and survives a hung final decode.
+                if !text.trim().is_empty() {
+                    log::debug!(target: "whisper", "stream partial ({} chars)", text.len());
+                    let _ = completed_tx.send(Ok(text.clone()));
+                }
                 latest_partial = text;
                 last_decoded_len = audio.len();
             } else {
@@ -369,6 +378,8 @@ fn recognizer_thread(
         }
     }
 
+    // Capture stopped (PTT released or deadline hit). Run one final decode over
+    // the whole utterance for best quality; it supersedes the streamed partials.
     if audio.len() < min_samples {
         let _ = completed_tx.send(Ok(String::new()));
         return;
@@ -394,25 +405,6 @@ fn transcribe_audio(
     config: &WhisperSttConfig,
     audio: &[f32],
 ) -> Result<String, WhisperSttError> {
-    // FORK DEBUG: log captured audio stats (INPUT to whisper)
-    {
-        let n = audio.len();
-        let peak = audio.iter().fold(0f32, |m, &s| m.max(s.abs()));
-        let rms = if n > 0 {
-            (audio.iter().map(|&s| s * s).sum::<f32>() / n as f32).sqrt()
-        } else {
-            0.0
-        };
-        eprintln!(
-            "[WHISPER-DBG] IN  samples={} dur={:.2}s peak={:.4} rms={:.4} lang={:?}{}",
-            n,
-            n as f32 / 16000.0,
-            peak,
-            rms,
-            config.language,
-            if peak < 0.01 { "  <-- SILENT INPUT" } else { "" }
-        );
-    }
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
     params.set_n_threads(config.n_threads);
@@ -440,10 +432,7 @@ fn transcribe_audio(
         .map(|segment| segment.to_string())
         .collect::<String>();
 
-    // FORK DEBUG: log raw + normalized transcript (OUTPUT from whisper)
-    let normalized = normalize_transcript(text.clone());
-    eprintln!("[WHISPER-DBG] OUT raw={:?} normalized={:?}", text, normalized);
-    Ok(normalized)
+    Ok(normalize_transcript(text))
 }
 
 fn rodio_capture_thread(
@@ -526,12 +515,6 @@ fn run_rodio_capture(
 
     let channels = mic.channels().get() as usize;
     let input_rate = mic.sample_rate().get() as usize;
-
-    // FORK DEBUG: log the actual capture device rodio/cpal opened
-    eprintln!(
-        "[WHISPER-DBG] CAPTURE opened: channels={} rate={} requested_device={:?}",
-        channels, input_rate, input_device_name
-    );
 
     if let Some(ready_tx) = ready_tx.take() {
         let _ = ready_tx.send(Ok(()));
