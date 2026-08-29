@@ -15,6 +15,9 @@ use wlx_common::audio::rodio::{
 const WHISPER_SAMPLE_RATE: usize = 16_000;
 const MAX_DURATION: Duration = Duration::from_secs(30);
 const UNLOAD_AFTER: Duration = Duration::from_mins(5);
+/// Upper bound for opening the mic stream. Bounds the UI-thread wait in
+/// `ptt_start` so a stalled/suspended capture device can't freeze the overlay.
+const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug)]
 pub struct WhisperSttConfig {
@@ -190,7 +193,10 @@ impl WhisperStt {
             })
             .map_err(|e| WhisperSttError::ThreadSpawn(e.to_string()))?;
 
-        match ready_rx.recv() {
+        // Wait for the capture thread to report the stream is open, but bounded:
+        // opening a suspended/stalled PipeWire source can hang, and this runs on
+        // the UI thread, so an unbounded recv() would freeze the whole overlay.
+        match ready_rx.recv_timeout(READY_TIMEOUT) {
             Ok(Ok(())) => {
                 self.active = Some(CaptureSession {
                     stop_tx,
@@ -201,27 +207,30 @@ impl WhisperStt {
 
                 Ok(progress_rx)
             }
-            Ok(Err(e)) => {
+            result => {
+                // Init failed or timed out. Signal stop and hand the threads to the
+                // reaper — never join here, a stalled mic open would block the UI.
                 let _ = stop_tx.send(StopCapture);
-                let _ = capture_thread.join();
-                let _ = recognizer_thread.join();
+                self.finished_captures.push(capture_thread);
+                self.finished_recognizers.push(recognizer_thread);
 
-                Err(WhisperSttError::CaptureInit(e))
-            }
-            Err(e) => {
-                let _ = stop_tx.send(StopCapture);
-                let _ = capture_thread.join();
-                let _ = recognizer_thread.join();
-
-                Err(WhisperSttError::CaptureInit(e.to_string()))
+                let msg = match result {
+                    Ok(Err(e)) => e,
+                    Err(_) => "microphone did not start within timeout".to_string(),
+                    Ok(Ok(())) => unreachable!(),
+                };
+                log::debug!(target: "whisper", "[3!] #{} capture init failed: {msg}", self.id);
+                Err(WhisperSttError::CaptureInit(msg))
             }
         }
     }
 
     fn stop_active_capture(&mut self) -> Result<(), WhisperSttError> {
         let Some(mut session) = self.active.take() else {
+            log::debug!(target: "whisper", "[8!] stop_active_capture #{}: no active session", self.id);
             return Err(WhisperSttError::NotRecording);
         };
+        log::debug!(target: "whisper", "[8] stop_active_capture #{} (signal + reaper)", self.id);
 
         // Signal both workers to wind down, then hand them to the lazy reaper.
         // We must not join here: this runs on the UI thread (button release,
@@ -542,6 +551,7 @@ fn run_rodio_capture(
 
     let channels = mic.channels().get() as usize;
     let input_rate = mic.sample_rate().get() as usize;
+    log::debug!(target: "whisper", "[4] mic capture opened (channels={channels} rate={input_rate})");
 
     if let Some(ready_tx) = ready_tx.take() {
         let _ = ready_tx.send(Ok(()));
