@@ -18,6 +18,10 @@ const UNLOAD_AFTER: Duration = Duration::from_mins(5);
 /// Upper bound for opening the mic stream. Bounds the UI-thread wait in
 /// `ptt_start` so a stalled/suspended capture device can't freeze the overlay.
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Peak amplitude (linear, 0..1) below which a window is treated as silence and
+/// not decoded. Whisper hallucinates confident phrases on silence, so gating it
+/// keeps garbage out of the panel. ~0.02 ≈ -34 dBFS, above room noise.
+const SILENCE_PEAK: f32 = 0.02;
 
 #[derive(Clone, Debug)]
 pub struct WhisperSttConfig {
@@ -52,7 +56,7 @@ impl WhisperSttConfig {
             language: std::env::var("WAYVR_WHISPER_LANG").ok().filter(|s| !s.is_empty()),
             initial_prompt: None,
             n_threads,
-            partial_decode_interval_ms: 700,
+            partial_decode_interval_ms: 400,
             min_audio_ms: 250,
             rodio_input_device_name: None,
             use_gpu: true,
@@ -405,24 +409,35 @@ fn recognizer_thread(
             audio.len().saturating_sub(last_decoded_len) >= partial_stride_samples;
 
         if audio.len() >= min_samples && enough_new_audio {
+            // Gate on the NEWLY appended window only, so trailing silence is
+            // actually skipped even after an earlier loud syllable.
+            let window_peak = audio[last_decoded_len..]
+                .iter()
+                .fold(0f32, |m, &s| m.max(s.abs()));
             let _ = progress_tx.send(PttProgress::ProcessedSamples(processed_samples));
             processed_samples += (audio.len() - last_decoded_len) as u32;
+            last_decoded_len = audio.len();
+            log::debug!(target: "whisper", "[5a] #{id} decode window peak {window_peak:.4} (total {} samples)", audio.len());
+
+            if window_peak < SILENCE_PEAK {
+                // Silence -> whisper hallucinates. Skip the decode entirely.
+                log::debug!(target: "whisper", "[5b] #{id} SKIP: below silence gate (peak {window_peak:.4})");
+                continue;
+            }
+
+            // FORK: stream each partial so take_transcription() gets live text
+            // without depending on a clean PTT stop -> loop-exit -> final decode.
+            // That chain is fragile (mic.next() can block, the loop may not exit,
+            // fast taps yield audio.len=0). Streaming partials makes the panel fill
+            // word-by-word as the user speaks and survives a hung final decode.
             if let Ok(text) = transcribe_audio(&ctx, &config, &audio) {
-                // FORK: stream each partial so take_transcription() gets live text
-                // without depending on a clean PTT stop -> loop-exit -> final decode.
-                // That chain is fragile (mic.next() can block, the loop may not exit,
-                // fast taps yield audio.len=0). Streaming partials makes the panel fill
-                // word-by-word as the user speaks and survives a hung final decode.
                 if !text.trim().is_empty() {
-                    log::debug!(target: "whisper", "[6] #{id} stream partial ({} chars) -> completed_tx", text.len());
+                    log::debug!(target: "whisper", "[6] #{id} stream partial -> completed_tx: {text:?}");
                     let _ = completed_tx.send(Ok(text.clone()));
                 }
                 latest_partial = text;
-                last_decoded_len = audio.len();
-            } else {
-                // do not fail the session on a speculative decode
-                // the final decode after PTT end gets reported
             }
+            // a speculative decode failure is non-fatal; the final decode reports it
         }
     }
 
@@ -440,9 +455,16 @@ fn recognizer_thread(
         return;
     }
 
+    let peak = audio.iter().fold(0f32, |m, &s| m.max(s.abs()));
+    if peak < SILENCE_PEAK {
+        log::debug!(target: "whisper", "[10-silence] #{id} whole utterance silent (peak {peak:.4}) -> send empty");
+        let _ = completed_tx.send(Ok(String::new()));
+        return;
+    }
+
     match transcribe_audio(&ctx, &config, &audio) {
         Ok(text) => {
-            log::debug!(target: "whisper", "[10] #{id} FINAL decode ({} chars) -> completed_tx", text.len());
+            log::debug!(target: "whisper", "[10] #{id} FINAL decode -> completed_tx: {text:?}");
             let _ = completed_tx.send(Ok(text));
         }
         Err(e) if !latest_partial.trim().is_empty() => {
