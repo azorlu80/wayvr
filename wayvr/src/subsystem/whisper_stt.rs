@@ -66,7 +66,6 @@ pub enum WhisperSttError {
     Rodio(String),
     CaptureInit(String),
     ThreadSpawn(String),
-    CaptureThreadPanicked,
     AlreadyRecording,
     NotRecording,
 }
@@ -79,7 +78,6 @@ impl fmt::Display for WhisperSttError {
             Self::Rodio(e) => write!(f, "rodio error: {e}"),
             Self::CaptureInit(e) => write!(f, "failed to initialize capture: {e}"),
             Self::ThreadSpawn(e) => write!(f, "failed to spawn thread: {e}"),
-            Self::CaptureThreadPanicked => write!(f, "capture thread panicked"),
             Self::AlreadyRecording => write!(f, "PTT is already active"),
             Self::NotRecording => write!(f, "PTT is not active"),
         }
@@ -102,7 +100,11 @@ pub struct WhisperStt {
     ctx: Arc<WhisperContext>,
 
     active: Option<CaptureSession>,
+    // Stopped threads are reaped lazily off the UI thread (see `reap_finished_threads`).
+    // Joining a capture/recognizer synchronously could block the caller — and the UI
+    // thread that drives it — if the mic stalls or a decode is still running.
     finished_recognizers: Vec<JoinHandle<()>>,
+    finished_captures: Vec<JoinHandle<()>>,
 
     completed_rx: mpsc::Receiver<Result<String, String>>,
     completed_tx: mpsc::Sender<Result<String, String>>,
@@ -140,6 +142,7 @@ impl WhisperStt {
             ctx: Arc::new(ctx),
             active: None,
             finished_recognizers: Vec::new(),
+            finished_captures: Vec::new(),
             completed_rx,
             completed_tx,
             last_error: None,
@@ -150,7 +153,7 @@ impl WhisperStt {
     /// starts a fresh capture stream and a transcription worker
     pub fn ptt_start(&mut self) -> Result<mpsc::Receiver<PttProgress>, WhisperSttError> {
         self.unload_at = Instant::now() + UNLOAD_AFTER;
-        self.reap_finished_recognizers();
+        self.reap_finished_threads();
 
         if self.active.is_some() {
             return Err(WhisperSttError::AlreadyRecording);
@@ -211,21 +214,20 @@ impl WhisperStt {
             return Err(WhisperSttError::NotRecording);
         };
 
+        // Signal both workers to wind down, then hand them to the lazy reaper.
+        // We must not join here: this runs on the UI thread (button release,
+        // panel close, Drop), and joining a stalled mic capture or an in-flight
+        // final decode would freeze the whole overlay.
         let _ = session.stop_tx.send(StopCapture);
 
-        let capture_result = if let Some(capture_thread) = session.capture_thread.take() {
-            capture_thread
-                .join()
-                .map_err(|_| WhisperSttError::CaptureThreadPanicked)
-        } else {
-            Ok(())
-        };
-
+        if let Some(capture_thread) = session.capture_thread.take() {
+            self.finished_captures.push(capture_thread);
+        }
         if let Some(recognizer_thread) = session.recognizer_thread.take() {
             self.finished_recognizers.push(recognizer_thread);
         }
 
-        capture_result
+        Ok(())
     }
 
     fn drain_completed_transcriptions(&mut self) -> Option<String> {
@@ -256,7 +258,7 @@ impl WhisperStt {
     }
 
     pub fn take_transcription(&mut self) -> Option<String> {
-        self.reap_finished_recognizers();
+        self.reap_finished_threads();
 
         let latest = self.drain_completed_transcriptions();
 
@@ -282,13 +284,18 @@ impl WhisperStt {
         self.unload_at < Instant::now()
     }
 
-    fn reap_finished_recognizers(&mut self) {
-        let mut i = 0;
+    /// Join any capture/recognizer threads that have already finished. Only
+    /// finished handles are joined, so this never blocks the caller.
+    fn reap_finished_threads(&mut self) {
+        Self::reap(&mut self.finished_recognizers);
+        Self::reap(&mut self.finished_captures);
+    }
 
-        while i < self.finished_recognizers.len() {
-            if self.finished_recognizers[i].is_finished() {
-                let handle = self.finished_recognizers.swap_remove(i);
-                let _ = handle.join();
+    fn reap(handles: &mut Vec<JoinHandle<()>>) {
+        let mut i = 0;
+        while i < handles.len() {
+            if handles[i].is_finished() {
+                let _ = handles.swap_remove(i).join();
             } else {
                 i += 1;
             }
@@ -298,13 +305,13 @@ impl WhisperStt {
 
 impl Drop for WhisperStt {
     fn drop(&mut self) {
+        // Signal any active capture to stop. Finished workers are joined; any
+        // still running (a stalled mic, an in-flight decode) are detached rather
+        // than joined, so dropping/closing the panel can never freeze the UI.
         if self.active.is_some() {
             let _ = self.ptt_end();
         }
-
-        for handle in self.finished_recognizers.drain(..) {
-            let _ = handle.join();
-        }
+        self.reap_finished_threads();
     }
 }
 
