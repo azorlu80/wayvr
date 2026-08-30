@@ -7,6 +7,8 @@ pub mod notifications;
 pub mod clipboard;
 
 #[cfg(feature = "whisper")]
+pub mod whisper_pw_capture;
+#[cfg(feature = "whisper")]
 pub mod whisper_stt;
 
 #[cfg(feature = "osc")]
