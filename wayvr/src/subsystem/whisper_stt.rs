@@ -55,20 +55,13 @@ impl WhisperSttConfig {
             // Fork patch: read whisper language from WAYVR_WHISPER_LANG env var
             // (e.g. "tr" for Turkish). Unset/empty => None => auto-detect (upstream default).
             language: std::env::var("WAYVR_WHISPER_LANG").ok().filter(|s| !s.is_empty()),
-            // Fork patch: seed a domain/dictation context so short or noisy audio
-            // decodes as dictation instead of falling into training-data
-            // hallucinations (e.g. the Turkish subtitle credit "Altyazı M.K.").
-            // Override with WAYVR_WHISPER_PROMPT.
+            // Optional dictation/domain context via WAYVR_WHISPER_PROMPT. A short
+            // prompt in the target language steers short/noisy audio toward
+            // dictation instead of training-data hallucinations. Language-neutral
+            // by default (unset => None); set it per deployment.
             initial_prompt: std::env::var("WAYVR_WHISPER_PROMPT")
                 .ok()
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    Some(
-                        "Yazılım geliştirici Türkçe sesli komut veriyor. \
-                         Claude, terminal, kod, commit, refactor, git, dosya, fonksiyon, hata."
-                            .to_string(),
-                    )
-                }),
+                .filter(|s| !s.is_empty()),
             n_threads,
             min_audio_ms: 250,
             // Fork patch: capture straight from this PipeWire source (e.g.
@@ -530,29 +523,7 @@ const fn ms_to_samples(ms: u64) -> usize {
 }
 
 fn normalize_transcript(text: String) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    // Belt-and-suspenders: even past the voice gate, whisper occasionally emits a
-    // stock silence hallucination as the WHOLE utterance. Drop those exact matches
-    // (a real command is longer / different).
-    const HALLUCINATIONS: &[&str] = &[
-        "altyazı m.k.",
-        "teşekkürler",
-        "teşekkür ederim",
-        "abone ol",
-        "i̇zlediğiniz için teşekkürler",
-        "thank you",
-        "thanks for watching",
-    ];
-    let key = text
-        .to_lowercase()
-        .trim_matches(|c: char| !c.is_alphanumeric())
-        .to_string();
-    if HALLUCINATIONS.contains(&key.as_str()) {
-        return String::new();
-    }
-
-    text
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
