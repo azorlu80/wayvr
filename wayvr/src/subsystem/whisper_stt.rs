@@ -12,7 +12,9 @@ use super::whisper_pw_capture;
 
 const WHISPER_SAMPLE_RATE: usize = 16_000;
 const MAX_DURATION: Duration = Duration::from_secs(30);
-const UNLOAD_AFTER: Duration = Duration::from_mins(5);
+// Keep the model (and its warmed-up GPU shaders) resident long enough to span a
+// work session; unloading forces a slow cold first decode next time.
+const UNLOAD_AFTER: Duration = Duration::from_mins(30);
 /// Upper bound for opening the mic stream. Bounds the UI-thread wait in
 /// `ptt_start` so a stalled/suspended capture device can't freeze the overlay.
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -71,7 +73,13 @@ impl WhisperSttConfig {
                 .ok()
                 .filter(|s| !s.is_empty()),
             use_gpu: true,
-            gpu_device: 0,
+            // Fork patch: pick the GPU via WAYVR_WHISPER_GPU (the whisper/ggml
+            // Vulkan device index). Defaults to 0; set to the discrete GPU (often
+            // 1) — decoding on a weak integrated GPU is what makes it slow.
+            gpu_device: std::env::var("WAYVR_WHISPER_GPU")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             flash_attn: false,
         }
     }
