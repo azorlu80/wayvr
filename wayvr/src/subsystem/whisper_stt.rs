@@ -7,10 +7,8 @@ use std::{
 };
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
-use wlx_common::audio::rodio::{
-    Source,
-    microphone::{MicrophoneBuilder, available_inputs},
-};
+
+use super::whisper_pw_capture;
 
 const WHISPER_SAMPLE_RATE: usize = 16_000;
 const MAX_DURATION: Duration = Duration::from_secs(30);
@@ -22,6 +20,11 @@ const READY_TIMEOUT: Duration = Duration::from_secs(3);
 /// not decoded. Whisper hallucinates confident phrases on silence, so gating it
 /// keeps garbage out of the panel. ~0.02 ≈ -34 dBFS, above room noise.
 const SILENCE_PEAK: f32 = 0.02;
+/// If no new audio arrives for this long the recognizer treats the utterance as
+/// finished and runs the final decode. This makes the result appear right after
+/// PTT release even when the capture thread can't drop its sender promptly
+/// (a stalled/blocking mic.next()), instead of hanging until the deadline.
+const RECOGNIZER_IDLE: Duration = Duration::from_millis(350);
 
 #[derive(Clone, Debug)]
 pub struct WhisperSttConfig {
@@ -31,14 +34,12 @@ pub struct WhisperSttConfig {
     pub initial_prompt: Option<String>,
     pub n_threads: i32,
 
-    /// lower values reduce release-time lag but cost more CPU/GPU
-    pub partial_decode_interval_ms: u64,
-
     /// ignore extremely short accidental taps
     pub min_audio_ms: u64,
 
-    /// force a specific recording device; see `rodio::microphone::available_inputs()`
-    pub rodio_input_device_name: Option<String>,
+    /// PipeWire source node to capture from (e.g. `"wivrn.source"`, the headset
+    /// mic). `None` connects to the default source.
+    pub capture_target: Option<String>,
 
     pub use_gpu: bool,
     pub gpu_device: i32,
@@ -54,11 +55,28 @@ impl WhisperSttConfig {
             // Fork patch: read whisper language from WAYVR_WHISPER_LANG env var
             // (e.g. "tr" for Turkish). Unset/empty => None => auto-detect (upstream default).
             language: std::env::var("WAYVR_WHISPER_LANG").ok().filter(|s| !s.is_empty()),
-            initial_prompt: None,
+            // Fork patch: seed a domain/dictation context so short or noisy audio
+            // decodes as dictation instead of falling into training-data
+            // hallucinations (e.g. the Turkish subtitle credit "Altyazı M.K.").
+            // Override with WAYVR_WHISPER_PROMPT.
+            initial_prompt: std::env::var("WAYVR_WHISPER_PROMPT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    Some(
+                        "Yazılım geliştirici Türkçe sesli komut veriyor. \
+                         Claude, terminal, kod, commit, refactor, git, dosya, fonksiyon, hata."
+                            .to_string(),
+                    )
+                }),
             n_threads,
-            partial_decode_interval_ms: 400,
             min_audio_ms: 250,
-            rodio_input_device_name: None,
+            // Fork patch: capture straight from this PipeWire source (e.g.
+            // "wivrn.source", the headset mic) via WAYVR_WHISPER_SOURCE, instead
+            // of the default source.
+            capture_target: std::env::var("WAYVR_WHISPER_SOURCE")
+                .ok()
+                .filter(|s| !s.is_empty()),
             use_gpu: true,
             gpu_device: 0,
             flash_attn: false,
@@ -70,7 +88,6 @@ impl WhisperSttConfig {
 pub enum WhisperSttError {
     ModelLoad(String),
     Whisper(String),
-    Rodio(String),
     CaptureInit(String),
     ThreadSpawn(String),
     AlreadyRecording,
@@ -82,7 +99,6 @@ impl fmt::Display for WhisperSttError {
         match self {
             Self::ModelLoad(e) => write!(f, "failed to load whisper model: {e}"),
             Self::Whisper(e) => write!(f, "whisper error: {e}"),
-            Self::Rodio(e) => write!(f, "rodio error: {e}"),
             Self::CaptureInit(e) => write!(f, "failed to initialize capture: {e}"),
             Self::ThreadSpawn(e) => write!(f, "failed to spawn thread: {e}"),
             Self::AlreadyRecording => write!(f, "PTT is already active"),
@@ -93,11 +109,8 @@ impl fmt::Display for WhisperSttError {
 
 impl std::error::Error for WhisperSttError {}
 
-struct StopCapture;
-
 struct CaptureSession {
-    stop_tx: mpsc::Sender<StopCapture>,
-    capture_thread: Option<JoinHandle<()>>,
+    pw_capture: whisper_pw_capture::PwCapture,
     recognizer_thread: Option<JoinHandle<()>>,
     deadline: Instant,
 }
@@ -176,7 +189,6 @@ impl WhisperStt {
 
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
-        let (stop_tx, stop_rx) = mpsc::channel::<StopCapture>();
         let (progress_tx, progress_rx) = mpsc::channel::<PttProgress>();
         // Fresh transcription channel per session: this recognizer is the only
         // producer for this receiver. A stale recognizer from an earlier session
@@ -189,29 +201,25 @@ impl WhisperStt {
             self.config.clone(),
             audio_rx,
             completed_tx,
-            progress_tx.clone(),
+            progress_tx,
         )?;
 
-        let input_device_name = self.config.rodio_input_device_name.clone();
+        // Native PipeWire capture connected straight to the source node (headset
+        // mic), delivering 16 kHz mono f32. It stops instantly by quitting its own
+        // loop — no blocking mic.next() the stop path can't interrupt.
+        let target = self.config.capture_target.clone();
+        let pw_capture =
+            whisper_pw_capture::start(target, WHISPER_SAMPLE_RATE as u32, audio_tx, ready_tx)
+                .map_err(WhisperSttError::CaptureInit)?;
 
-        let capture_thread = thread::Builder::new()
-            .name("whisper-stt-rodio-capture".to_string())
-            .spawn(move || {
-                rodio_capture_thread(audio_tx, stop_rx, input_device_name, ready_tx, progress_tx);
-            })
-            .map_err(|e| WhisperSttError::ThreadSpawn(e.to_string()))?;
-
-        // Wait for the capture thread to report the stream is open, but bounded:
-        // opening a suspended/stalled PipeWire source can hang, and this runs on
-        // the UI thread, so an unbounded recv() would freeze the whole overlay.
+        // Bounded wait for the stream to connect (runs on the UI thread).
         match ready_rx.recv_timeout(READY_TIMEOUT) {
             Ok(Ok(())) => {
                 // Switch the panel to listen on this session's channel. The old
                 // receiver (if any) drops here, discarding any stale in-flight text.
                 self.completed_rx = Some(completed_rx);
                 self.active = Some(CaptureSession {
-                    stop_tx,
-                    capture_thread: Some(capture_thread),
+                    pw_capture,
                     recognizer_thread: Some(recognizer_thread),
                     deadline: Instant::now() + MAX_DURATION,
                 });
@@ -219,10 +227,9 @@ impl WhisperStt {
                 Ok(progress_rx)
             }
             result => {
-                // Init failed or timed out. Signal stop and hand the threads to the
-                // reaper — never join here, a stalled mic open would block the UI.
-                let _ = stop_tx.send(StopCapture);
-                self.finished_captures.push(capture_thread);
+                // Init failed or timed out. Dropping the capture stops it instantly
+                // (which drops audio_tx, so the recognizer exits); reap the worker.
+                drop(pw_capture);
                 self.finished_recognizers.push(recognizer_thread);
 
                 let msg = match result {
@@ -241,17 +248,13 @@ impl WhisperStt {
             log::debug!(target: "whisper", "[8!] stop_active_capture #{}: no active session", self.id);
             return Err(WhisperSttError::NotRecording);
         };
-        log::debug!(target: "whisper", "[8] stop_active_capture #{} (signal + reaper)", self.id);
+        log::debug!(target: "whisper", "[8] stop_active_capture #{} (stop capture + reaper)", self.id);
 
-        // Signal both workers to wind down, then hand them to the lazy reaper.
-        // We must not join here: this runs on the UI thread (button release,
-        // panel close, Drop), and joining a stalled mic capture or an in-flight
-        // final decode would freeze the whole overlay.
-        let _ = session.stop_tx.send(StopCapture);
-
-        if let Some(capture_thread) = session.capture_thread.take() {
-            self.finished_captures.push(capture_thread);
-        }
+        // Stop the capture: quits its loop and joins its thread in ~1ms (verified),
+        // then drops audio_tx so the recognizer's recv() returns Err and it runs
+        // the final decode. The recognizer is handed to the lazy reaper — never
+        // joined on the UI thread, since a final decode may still be running.
+        session.pw_capture.stop();
         if let Some(recognizer_thread) = session.recognizer_thread.take() {
             self.finished_recognizers.push(recognizer_thread);
         }
@@ -389,55 +392,45 @@ fn recognizer_thread(
     progress_tx: mpsc::Sender<PttProgress>,
 ) {
     log::debug!(target: "whisper", "[5] recognizer #{id} started");
-    let partial_stride_samples =
-        ms_to_samples(config.partial_decode_interval_ms).max(WHISPER_SAMPLE_RATE / 4);
     let min_samples = ms_to_samples(config.min_audio_ms);
 
     let mut audio = Vec::<f32>::new();
-    let mut last_decoded_len = 0usize;
-    let mut latest_partial = String::new();
-    let mut processed_samples = 0;
-
-    while let Ok(chunk) = audio_rx.recv() {
+    let latest_partial = String::new();
+    let mut last_voice: Option<Instant> = None;
+    let mut voiced_samples = 0usize;
+    loop {
+        // Break (and run the final decode) when the capture closes the channel or
+        // no samples arrive for a while.
+        let chunk = match audio_rx.recv_timeout(RECOGNIZER_IDLE) {
+            Ok(chunk) => chunk,
+            Err(_) => break,
+        };
         if chunk.is_empty() {
             continue;
         }
 
+        // The mic is kept warm, so the stream never actually goes quiet — it just
+        // delivers silence. The reliable end-of-utterance signal is therefore
+        // "voice, then RECOGNIZER_IDLE of silence", not "no samples".
+        let chunk_peak = chunk.iter().fold(0f32, |m, &s| m.max(s.abs()));
+        if chunk_peak >= SILENCE_PEAK {
+            last_voice = Some(Instant::now());
+            voiced_samples += chunk.len();
+        }
+
         audio.extend_from_slice(&chunk);
 
-        let enough_new_audio =
-            audio.len().saturating_sub(last_decoded_len) >= partial_stride_samples;
-
-        if audio.len() >= min_samples && enough_new_audio {
-            // Gate on the NEWLY appended window only, so trailing silence is
-            // actually skipped even after an earlier loud syllable.
-            let window_peak = audio[last_decoded_len..]
-                .iter()
-                .fold(0f32, |m, &s| m.max(s.abs()));
-            let _ = progress_tx.send(PttProgress::ProcessedSamples(processed_samples));
-            processed_samples += (audio.len() - last_decoded_len) as u32;
-            last_decoded_len = audio.len();
-            log::debug!(target: "whisper", "[5a] #{id} decode window peak {window_peak:.4} (total {} samples)", audio.len());
-
-            if window_peak < SILENCE_PEAK {
-                // Silence -> whisper hallucinates. Skip the decode entirely.
-                log::debug!(target: "whisper", "[5b] #{id} SKIP: below silence gate (peak {window_peak:.4})");
-                continue;
-            }
-
-            // FORK: stream each partial so take_transcription() gets live text
-            // without depending on a clean PTT stop -> loop-exit -> final decode.
-            // That chain is fragile (mic.next() can block, the loop may not exit,
-            // fast taps yield audio.len=0). Streaming partials makes the panel fill
-            // word-by-word as the user speaks and survives a hung final decode.
-            if let Ok(text) = transcribe_audio(&ctx, &config, &audio) {
-                if !text.trim().is_empty() {
-                    log::debug!(target: "whisper", "[6] #{id} stream partial -> completed_tx: {text:?}");
-                    let _ = completed_tx.send(Ok(text.clone()));
-                }
-                latest_partial = text;
-            }
-            // a speculative decode failure is non-fatal; the final decode reports it
+        // No interim decoding: a full whisper decode every stride hogged this loop
+        // so the end-of-utterance break never ran. Just accumulate + track voice
+        // here, then decode ONCE below. Cheap loop -> the break fires promptly.
+        // Feed the live VU meter straight from the captured chunk.
+        let _ = progress_tx.send(PttProgress::VuVolume(chunk_peak));
+        let _ = progress_tx.send(PttProgress::SentSamples(audio.len() as u32));
+        let _ = progress_tx.send(PttProgress::ProcessedSamples(audio.len() as u32));
+        if let Some(voiced_at) = last_voice
+            && voiced_at.elapsed() >= RECOGNIZER_IDLE
+        {
+            break;
         }
     }
 
@@ -455,9 +448,15 @@ fn recognizer_thread(
         return;
     }
 
-    let peak = audio.iter().fold(0f32, |m, &s| m.max(s.abs()));
-    if peak < SILENCE_PEAK {
-        log::debug!(target: "whisper", "[10-silence] #{id} whole utterance silent (peak {peak:.4}) -> send empty");
+    // Require a real amount of actual speech, not just a noise blip. Without this
+    // whisper confidently hallucinates a phrase ("Teşekkürler", "Altyazı M.K.")
+    // over a near-silent buffer.
+    if voiced_samples < min_samples {
+        log::debug!(
+            target: "whisper",
+            "[10-novoice] #{id} only {:.2}s of voice -> send empty",
+            voiced_samples as f32 / WHISPER_SAMPLE_RATE as f32
+        );
         let _ = completed_tx.send(Ok(String::new()));
         return;
     }
@@ -494,6 +493,17 @@ fn transcribe_audio(
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    // Anti-hallucination: greedy/deterministic decode, drop blanks, reject
+    // segments the model flags as non-speech, and suppress non-speech tokens
+    // (curbs "Altyazı M.K." / "Teşekkürler" on silence).
+    params.set_temperature(0.0);
+    params.set_suppress_blank(true);
+    params.set_suppress_nst(true);
+    params.set_no_speech_thold(0.6);
+    // Short independent PTT command -> one segment, no carry-over context. Also
+    // trims decode time.
+    params.set_single_segment(true);
+    params.set_no_context(true);
 
     if let Some(prompt) = config.initial_prompt.as_deref() {
         params.set_initial_prompt(prompt);
@@ -515,224 +525,34 @@ fn transcribe_audio(
     Ok(normalize_transcript(text))
 }
 
-fn rodio_capture_thread(
-    audio_tx: mpsc::Sender<Vec<f32>>,
-    stop_rx: mpsc::Receiver<StopCapture>,
-    input_device_name: Option<String>,
-    ready_tx: mpsc::Sender<Result<(), String>>,
-    progress_tx: mpsc::Sender<PttProgress>,
-) {
-    let mut ready_tx = Some(ready_tx);
-
-    let result = run_rodio_capture(
-        audio_tx,
-        stop_rx,
-        input_device_name,
-        &mut ready_tx,
-        progress_tx,
-    );
-
-    if let Err(e) = result
-        && let Some(ready_tx) = ready_tx.take()
-    {
-        let _ = ready_tx.send(Err(e.to_string()));
-    }
-}
-
-fn run_rodio_capture(
-    audio_tx: mpsc::Sender<Vec<f32>>,
-    stop_rx: mpsc::Receiver<StopCapture>,
-    input_device_name: Option<String>,
-    ready_tx: &mut Option<mpsc::Sender<Result<(), String>>>,
-    progress_tx: mpsc::Sender<PttProgress>,
-) -> Result<(), WhisperSttError> {
-    let builder = MicrophoneBuilder::new();
-
-    let builder = if let Some(input_device_name) = input_device_name {
-        let inputs = available_inputs().map_err(|e| WhisperSttError::Rodio(e.to_string()))?;
-        let input_device_name_lower = input_device_name.to_lowercase();
-
-        let input = inputs
-            .into_iter()
-            .find(|input| {
-                input
-                    .to_string()
-                    .to_lowercase()
-                    .contains(&input_device_name_lower)
-            })
-            .ok_or_else(|| {
-                WhisperSttError::Rodio(format!(
-                    "no rodio input device matched {input_device_name:?}"
-                ))
-            })?;
-
-        builder
-            .device(input)
-            .map_err(|e| WhisperSttError::Rodio(e.to_string()))?
-    } else {
-        builder
-            .default_device()
-            .map_err(|e| WhisperSttError::Rodio(e.to_string()))?
-    };
-
-    let builder = builder
-        .default_config()
-        .map_err(|e| WhisperSttError::Rodio(e.to_string()))?
-        .prefer_channel_counts([
-            1.try_into().expect("not zero"),
-            2.try_into().expect("not zero"),
-        ])
-        .prefer_sample_rates([
-            16_000.try_into().expect("not zero"),
-            32_000.try_into().expect("not zero"),
-            48_000.try_into().expect("not zero"),
-        ])
-        .prefer_buffer_sizes(512..);
-
-    let mut mic = builder
-        .open_stream()
-        .map_err(|e| WhisperSttError::Rodio(e.to_string()))?;
-
-    let channels = mic.channels().get() as usize;
-    let input_rate = mic.sample_rate().get() as usize;
-    log::debug!(target: "whisper", "[4] mic capture opened (channels={channels} rate={input_rate})");
-
-    if let Some(ready_tx) = ready_tx.take() {
-        let _ = ready_tx.send(Ok(()));
-    }
-
-    let mut resampler = StreamingResampler::default();
-    let mut interleaved = Vec::new();
-
-    // ~20 ms of input frames; whisper still receives 16 kHz mono chunks
-    let chunk_input_samples = ((input_rate / 50).max(1)) * channels.max(1);
-
-    let mut sent_samples: u32 = 0;
-
-    'capture: loop {
-        if stop_rx.try_recv().is_ok() {
-            break;
-        }
-
-        interleaved.clear();
-
-        while interleaved.len() < chunk_input_samples {
-            if stop_rx.try_recv().is_ok() {
-                break 'capture;
-            }
-
-            let Some(sample) = mic.next() else {
-                return Err(WhisperSttError::Rodio(
-                    "microphone stream ended unexpectedly".to_string(),
-                ));
-            };
-
-            // Rodio's default sample type is f32. This cast also keeps the code
-            // compiling if the crate is built with rodio's `64bit` feature.
-            interleaved.push(sample);
-        }
-
-        let resampled_vec = resampler.push_interleaved_mono_16k(&interleaved, channels, input_rate);
-
-        if !resampled_vec.is_empty() {
-            // Absolute value: audio swings negative too, so a signed max would
-            // under-report level and misread the meter/clipping.
-            let mut loudest_sample: f32 = 0.0;
-            for sample in &resampled_vec {
-                loudest_sample = loudest_sample.max(sample.abs());
-            }
-
-            let _ = progress_tx.send(PttProgress::VuVolume(loudest_sample));
-            let _ = progress_tx.send(PttProgress::SentSamples(sent_samples));
-            sent_samples += resampled_vec.len() as u32;
-
-            if audio_tx.send(resampled_vec).is_err() {
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Default)]
-struct StreamingResampler {
-    pending: Vec<f32>,
-    position: f64,
-    input_rate: usize,
-}
-
-impl StreamingResampler {
-    fn push_interleaved_mono_16k(
-        &mut self,
-        samples: &[f32],
-        channels: usize,
-        input_rate: usize,
-    ) -> Vec<f32> {
-        if channels == 0 || input_rate == 0 {
-            return Vec::new();
-        }
-
-        if self.input_rate != input_rate {
-            self.pending.clear();
-            self.position = 0.0;
-            self.input_rate = input_rate;
-        }
-
-        let frames = samples.len() / channels;
-        if frames == 0 {
-            return Vec::new();
-        }
-
-        let mut mono = Vec::with_capacity(frames);
-
-        for frame in 0..frames {
-            let frame_start = frame * channels;
-            let mut sum = 0.0f32;
-
-            for ch in 0..channels {
-                sum += samples[frame_start + ch];
-            }
-
-            mono.push(sum / channels as f32);
-        }
-
-        self.pending.extend_from_slice(&mono);
-
-        let step = input_rate as f64 / WHISPER_SAMPLE_RATE as f64;
-        let mut out = Vec::with_capacity(
-            ((self.pending.len() as f64 - self.position) / step).max(0.0) as usize,
-        );
-
-        #[allow(clippy::while_float)]
-        while self.position + 1.0 < self.pending.len() as f64 {
-            let i = self.position.floor() as usize;
-            let frac = (self.position - i as f64) as f32;
-
-            let a = self.pending[i];
-            let b = self.pending[i + 1];
-
-            out.push(a + (b - a) * frac);
-
-            self.position += step;
-        }
-
-        let drop_count = self.position.floor() as usize;
-        if drop_count > 0 {
-            self.pending.drain(..drop_count);
-            self.position -= drop_count as f64;
-        }
-
-        out
-    }
-}
-
 const fn ms_to_samples(ms: u64) -> usize {
     ((ms as usize) * WHISPER_SAMPLE_RATE) / 1000
 }
 
 fn normalize_transcript(text: String) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Belt-and-suspenders: even past the voice gate, whisper occasionally emits a
+    // stock silence hallucination as the WHOLE utterance. Drop those exact matches
+    // (a real command is longer / different).
+    const HALLUCINATIONS: &[&str] = &[
+        "altyazı m.k.",
+        "teşekkürler",
+        "teşekkür ederim",
+        "abone ol",
+        "i̇zlediğiniz için teşekkürler",
+        "thank you",
+        "thanks for watching",
+    ];
+    let key = text
+        .to_lowercase()
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_string();
+    if HALLUCINATIONS.contains(&key.as_str()) {
+        return String::new();
+    }
+
+    text
 }
 
 #[cfg(test)]
@@ -744,7 +564,7 @@ mod tests {
         assert_eq!(ms_to_samples(0), 0);
         assert_eq!(ms_to_samples(1000), 16_000);
         assert_eq!(ms_to_samples(250), 4_000); // min_audio_ms default
-        assert_eq!(ms_to_samples(400), 6_400); // partial_decode_interval_ms default
+        assert_eq!(ms_to_samples(400), 6_400);
     }
 
     #[test]
@@ -756,52 +576,5 @@ mod tests {
         assert_eq!(normalize_transcript("\n\ttek\n".to_string()), "tek");
         assert_eq!(normalize_transcript(String::new()), "");
         assert_eq!(normalize_transcript("   ".to_string()), "");
-    }
-
-    #[test]
-    fn resampler_rejects_degenerate_input() {
-        let mut r = StreamingResampler::default();
-        assert!(r.push_interleaved_mono_16k(&[0.1, 0.2], 0, 16_000).is_empty());
-        assert!(r.push_interleaved_mono_16k(&[0.1, 0.2], 1, 0).is_empty());
-    }
-
-    #[test]
-    fn resampler_passthrough_16khz_mono() {
-        let mut r = StreamingResampler::default();
-        let input: Vec<f32> = (0..1000).map(|i| i as f32).collect();
-        let out = r.push_interleaved_mono_16k(&input, 1, 16_000);
-        // step == 1.0 at 16 kHz mono -> ~one output sample per input sample.
-        assert!((out.len() as i64 - 1000).abs() <= 3, "got {}", out.len());
-        assert!((out[0] - 0.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn resampler_averages_stereo_to_mono() {
-        let mut r = StreamingResampler::default();
-        // 4 stereo frames, L=1.0 R=3.0 -> each mono sample should be 2.0.
-        let input = [1.0, 3.0, 1.0, 3.0, 1.0, 3.0, 1.0, 3.0];
-        let out = r.push_interleaved_mono_16k(&input, 2, 16_000);
-        assert!(!out.is_empty());
-        for s in out {
-            assert!((s - 2.0).abs() < 1e-3, "expected mono avg 2.0, got {s}");
-        }
-    }
-
-    #[test]
-    fn resampler_downsamples_48k_to_16k() {
-        let mut r = StreamingResampler::default();
-        let input: Vec<f32> = (0..480).map(|i| (i % 2) as f32).collect(); // 480 mono @ 48 kHz
-        let out = r.push_interleaved_mono_16k(&input, 1, 48_000);
-        // 48 kHz -> 16 kHz is a 1/3 ratio, so expect ~160 samples.
-        assert!((out.len() as i64 - 160).abs() <= 3, "got {}", out.len());
-    }
-
-    #[test]
-    fn resampler_resets_state_on_rate_change() {
-        let mut r = StreamingResampler::default();
-        let _ = r.push_interleaved_mono_16k(&[0.5; 100], 1, 44_100);
-        // A new input rate must clear stale pending samples, not blend across rates.
-        let out = r.push_interleaved_mono_16k(&[0.0; 480], 1, 48_000);
-        assert!((out.len() as i64 - 160).abs() <= 3, "got {}", out.len());
     }
 }
