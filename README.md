@@ -78,6 +78,7 @@ All configuration is via environment variables — safe defaults, no code change
 |---|---|---|
 | `WAYVR_WHISPER_LANG` | Whisper decode language. | unset → auto-detect |
 | `WAYVR_WHISPER_SOURCE` | PipeWire source node to capture from. Set to the headset mic. | unset → default source |
+| `WAYVR_WHISPER_GPU` | Whisper/ggml Vulkan device index. On a laptop the discrete GPU is often `1`; the default `0` may be the slow integrated GPU. | `0` |
 | `WAYVR_WHISPER_PROMPT` | Optional dictation/domain context in the target language; steers short or noisy audio toward dictation and away from training-data hallucinations. | unset → none |
 | `RUST_LOG=whisper=debug` | Emit the numbered pipeline trace (`[1]…[13]`) for diagnostics. | off |
 
