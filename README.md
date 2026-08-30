@@ -1,217 +1,143 @@
-![WayVR splash screen header](https://github.com/wayvr-org/wayvr/blob/guide/wayvr-readme-header.webp?raw=true)
-
-# WayVR (previously WlxOverlay-S)
-
-A lightweight OpenXR/OpenVR overlay for Wayland and X11 desktops.
-
-WayVR lets you access your desktop screens while in VR, and even launch apps directly in VR.
-
-In comparison to similar overlays, WayVR aims to run alongside VR games and experiences while having as little performance impact as possible. The UI appearance and rendering techniques are kept as simple and efficient as possible, while still allowing a high degree of customizability.
-
-![Screenshot of WayVR being used as an OpenXR home environment](https://github.com/wayvr-org/wayvr/blob/guide/wayvr-readme-screenshot.webp?raw=true)
-
-## Join the Linux VR Community
-
-We are available on either **Discord** or **Matrix space**:
-
-[![LVRA Discord](https://img.shields.io/discord/1065291958328758352?style=for-the-badge/&logo=discord)](https://discord.gg/EHAYe3tTYa) [![LVRA Matrix](https://img.shields.io/matrix/linux-vr-adventures:matrix.org?logo=matrix&style=for-the-badge)](https://matrix.to/#/#linux-vr-adventures:matrix.org)
-
-Questions/issues specific to WayVR will be handled in the `wayvr` chat room. Feel free to ask anything.
-
-## Setup
-
-### Installation
-
-There are multiple ways to install WayVR:
-
-1. AppImage: Download from [Releases](https://github.com/wayvr-org/wayvr/releases)
-1. AUR package: [wayvr](https://aur.archlinux.org/packages/wayvr) or [wayvr-git](https://aur.archlinux.org/packages/wayvr-git)
-1. Nix package: [wayvr](https://search.nixos.org/packages?channel=unstable&show=wayvr&query=wayvr) or [unstable package from nixpkgs-xr](https://github.com/nix-community/nixpkgs-xr)
-1. [Homebrew-XR](https://tangled.org/matrixfurry.com/homebrew-xr) package (for Bazzite, etc.): [wayvr](https://tangled.org/matrixfurry.com/homebrew-xr/#installing-applications)
-1. [Docs: Building from source](https://wayvr.org/docs/basics/building-from-source/).
-
-### General Setup
-
-1. Start Monado, WiVRn or SteamVR.
-1. Run the overlay
-
-**Note:** If you are using Monado or WiVRn, no additional setup steps are required for Flatpak Steam compatibility—most people use WayVR seamlessly with Monado/WiVRn.
-
-### SteamVR via Steam Flatpak
-
-For users specifically running **SteamVR via Steam Flatpak**, follow these steps:
-
-1. Grab the latest AppImage from [Releases](https://github.com/wayvr-org/wayvr/releases).
-1. `WayVR-*.AppImage --appimage-extract`
-1. `chmod +x squashfs-root/AppRun`
-1. Move the newly created `squashfs-root` folder to a location accessible by the Steam Flatpak.
-1. `flatpak override com.valvesoftware.Steam --user --filesystem=xdg-run/pipewire-0/:rw`
-1. Restart Steam.
-1. Start SteamVR.
-1. `flatpak run --command='/path/to/squashfs-root/AppRun' com.valvesoftware.Steam`
-
-## First Start
-
-**When the screen share pop-up appears, check your notifications or the terminal and select the screens in the order it requests.**
-
-In case screens were selected in the wrong order:
-
-- Go to Settings and press `Clear PipeWire tokens` and then `Restart software`
-- Pay attention to your notifications, which tell you in which order to pick the screens.
-- If notifications don't show, try starting WayVR from the terminal and look for instructions in there.
-
-**WiVRn users**: Select WayVR from the `Application` drop-down. If there's no such entry, select `Custom` and browse to your WayVR executable or AppImage.
-
-**Envision users**: Go to the Plugins menu and toggle on the WayVR plugin. If WayVR isn't in the Plugins list, or the list is empty, ensure you've installed WayVR fully, such that it appears in your Desktop Environment's application menu. If you've *downloaded* the WayVR AppImage, [Gear Lever](https://github.com/mijorus/gearlever) can *install* it, which creates the application menu entry.
-
-**SteamVR users**: WayVR no longer registers itself for auto-start, due to bugs in SteamVR. For now, you must start WayVR manually.
-
-This will show a home environment with headset passthrough enabled by default or a [customizable background](https://wayvr.org/docs/various/openxr-skybox/)!
-
-**Please continue reading the guide below.**
-
-## Getting Started
-
-### Working Set
-
-The working set consists of all currently selected overlays: screens, mirrors, keyboard, etc.
-
-The working set appears in front of the headset when shown, and can be re-centered by hiding and showing again.
-
-Show and hide the working set using:
-
-- Non-vive controller: double-tap B or Y on the left controller.
-- Vive controller: double-tap the menu button on the left controller (for SteamVR, the `showhide` binding must be bound)
-
-Moving overlays: Grab + Joystick
-
-Resizing overlays: Grab + Click + Joystick
-
-### Pointer Modes AKA Laser Colors
-
-Much of the functionality in WayVR depends on what color of laser is used to interact with a UI element. \
-Using the default settings, there are 3 modes:
-
-- Regular Mode: Blue laser
-- Right-click Mode: Orange laser
-- Middle-click Mode: Purple laser
-
-Please see the bindings section below on how to activate these modes.
-
-The guide here uses the colors for ease of getting started.
-
-### Edit mode
-
-Ways to enter Edit mode:
-- Edit mode button on Watch face
-- Taskbar (top of keyboard) hamburger menu
-- Edit mode button on the title bar of WayVR apps (next to X button)
-
-Edit mode lets you grab overlays and reposition them in yourset.
-
-It's also possible to change overlay behavior and tweak your overlays in different way.
-
-While in edit mode, try hovering over various overlays to see their options!
-
-### The watch
-
-Check your left wrist for the watch. The watch is the primary tool for controlling the app.
-
-The top of the watch shows device batteries, and the bottom shows your overlay controls.
-
-While in edit mode, the watch can also be grabbed and passed between your hands.
-
-After grabbing, the watch will automatically attach to the hand that's opposite from the one that held it.
-
-### The screens
-
-Hovering a pointer over a screen will move the mouse. If more than one pointer is hovering over a screen, the pointer that was last used to click will take precedence.
-
-The click type depends on the laser color:
-
-- Blue laser: Left click
-- Orange laser: Right click
-- Purple laser: Middle click
-- Stick up/down: Scroll wheel
-
-### The keyboard
-
-The keyboard sends keys to the screen or WayVR application with the most recent mouse interaction.
-
-On top of the keyboard is the taskbar, which lists WayVR apps as well as screens, mirrors and panels overlays.
-
-Typing
-
-- Use the BLUE laser when typing regularly.
-- While using the ORANGE laser, all keystrokes will have SHIFT applied.
-- Purple laser is customizable via the settings, no modifier by default.
-
-**Modifier Keys are sticky**. They will remain pressed until either:
-
-- a non-modifier key is pressed
-- the modifier is toggled off by clicking again
-- the keyboard is hidden (including via show-hide)
-
-### Default Bindings
-
-![Index Controller Bindings](https://github.com/wayvr-org/wayvr/blob/guide/wlx-index.png)
-
-![Touch Controller Bindings](https://github.com/wayvr-org/wayvr/blob/guide/wlx-oculus.png)
-
-### Changing Bindings
-
-- SteamVR: Simply change the bindings from the SteamVR bindings section. 
-  - If WayVR doesn't show up on the list, select any other title and then press back on the top left. (SteamVR bug)
-- Monado/WiVRn: See WayVR Dashboard → Settings → Controls.
-
-## Customization
-
-See these relevant wiki pages:
-
-- For all available config options, check [Docs: Configuration](https://wayvr.org/docs/basics/configuration/)
-- Looking to customize look & feel, or add functionality? See [Docs: Customization](https://wayvr.org/docs/basics/customization/)
-- Looking to change the OpenXR background? See [Docs: OpenXR Skybox](https://wayvr.org/docs/various/openxr-skybox/)
-
-## Troubleshooting
-
-When an error is detected, we often print tips for fixing it into the log file.
-
-Logs will be at `/tmp/wayvr.log` for most distros.
-
-Check [here](https://wayvr.org/docs/various/troubleshooting/) for tips.
-
-## Known Issues
-
-### Mouse movement is wrong
-
-**If the mouse is moving on a completely different screen**, the screens were likely selected in the wrong order:
-
-- Go to Settings and press `Clear PipeWire tokens` and then `Restart software`
-- Pay attention to your notifications, which tell you in which order to pick the screens.
-- If notifications don't show, try starting WayVR from the terminal and look for instructions in there.
-
-**If the mouse is on the correct screen but moves in weird ways**, enter Edit Mode, hover the screen and under Mouse Fixes, select the mode that works.
-
-COSMIC desktop:
-
-- Due to limitations with COSMIC, the mouse can only move on a single display.
-
-X11 users:
-
-- Might be dealing with a [Phantom Monitor](https://wiki.archlinux.org/title/Xrandr#Disabling_phantom_monitor).
-- DPI scaling is not supported and will mess with the mouse.
-- Upright screens are not supported and will mess with the mouse.
-
-### Screens or launched apps don't work when auto-started by SteamVR or WiVRn
-
-SteamVR starts WayVR in the Steam runtime, and systemd/flatpak WiVRn can also start WayVR in a sub-optimal environment.
-
-The easiest fix is to start WayVR separately. It's possible to start WayVR before starting SteamVR/WiVRn by passing `--wait`:
-- `wayvr --wait` or `/path/to/WayVR.AppImage --wait`
-
-### X11 limitations
-
-- X11 capture can generally seem slow. This is because zero-copy GPU capture is not supported on the general X11 desktop. Consider trying Wayland.
-- DPI scaling is not supported and may cause the mouse to not follow the laser properly.
-- Upright screens are not supported and can cause the mouse to not follow the laser properly.
-- Screen changes (connecting/disconnecting a display, resolution changes, etc) are not handled at runtime. Restart the overlay for these to take effect.
+# WayVR — Whisper Voice Dictation
+
+> **Fork of [wayvr-org/wayvr](https://github.com/wayvr-org/wayvr).** This README
+> covers the Whisper voice-dictation work in this fork; for the base overlay
+> (installation, general usage, features) see **[UPSTREAM-README.md](UPSTREAM-README.md)**.
+
+Reliable, low-latency **push-to-talk speech-to-text inside VR** for the
+[WayVR](https://github.com/wayvr-org/wayvr) overlay on Linux. Hold a button,
+speak, release — the recognized text lands in the panel and can be pasted into
+the focused application. Built for hands-on-keyboard-free *voice coding* in a
+Wayland/X11 desktop streamed to a standalone headset over
+[WiVRn](https://github.com/WiVRn/WiVRn).
+
+This fork rebuilds the audio-capture and decode pipeline that upstream shipped as
+experimental, turning it into a production-grade, language-neutral component.
+
+---
+
+## Highlights
+
+- **Deterministic push-to-talk lifecycle.** Press starts capture; release ends
+  the utterance and triggers exactly one transcription. No background decode loop
+  racing the capture.
+- **Native PipeWire capture.** Connects a PipeWire stream directly to a named
+  source node (the headset mic) and stops in ~1.5 ms by quitting its own loop —
+  no blocking device read to interrupt, and no fragile `ALSA default → pulse →
+  pipewire` routing.
+- **One decode per utterance.** Audio is buffered while the button is held and
+  decoded once on release (or on a short trailing silence via lightweight VAD).
+  Eliminates the panel flicker and GPU thrash of streaming interim decodes.
+- **Hallucination-resistant.** A voice-activity gate plus tuned Whisper
+  parameters keep the model from emitting confident stock phrases over silence.
+- **Language-neutral by default.** Language, capture source, and dictation prompt
+  are all environment-driven; nothing locale-specific is hard-coded.
+- **UI-thread safe.** Capture/recognizer threads are never joined on the render
+  thread, so a stalled mic or an in-flight decode can never freeze the overlay.
+
+---
+
+## Quick start
+
+Build WayVR with the `whisper` feature (pulls in `pipewire` and
+`whisper-rs`/Vulkan):
+
+```sh
+cargo build --release --all-features
+```
+
+Point WayVR at the headset microphone and your language. With WiVRn, set the
+environment in `~/.config/wivrn/config.json`:
+
+```json
+{
+  "application": [
+    "env",
+    "WAYVR_WHISPER_LANG=tr",
+    "WAYVR_WHISPER_SOURCE=wivrn.source",
+    "WAYVR_WHISPER_PROMPT=Yazılım geliştirici Türkçe sesli komut veriyor. Claude, terminal, kod, commit, refactor.",
+    "/path/to/target/release/wayvr"
+  ]
+}
+```
+
+Then in VR: open the Whisper panel, **hold** the transcribe button while
+speaking, **release**, and use **Paste-and-Go** to send the text to the focused
+window.
+
+> The Whisper model (`ggml-large-v3-turbo`) is loaded from WayVR's data
+> directory, as upstream.
+
+---
+
+## Configuration reference
+
+All configuration is via environment variables — safe defaults, no code changes.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `WAYVR_WHISPER_LANG` | Whisper decode language. | unset → auto-detect |
+| `WAYVR_WHISPER_SOURCE` | PipeWire source node to capture from. Set to the headset mic. | unset → default source |
+| `WAYVR_WHISPER_PROMPT` | Optional dictation/domain context in the target language; steers short or noisy audio toward dictation and away from training-data hallucinations. | unset → none |
+| `RUST_LOG=whisper=debug` | Emit the numbered pipeline trace (`[1]…[13]`) for diagnostics. | off |
+
+---
+
+## Architecture
+
+```
+ PTT press ──▶ ptt_start ──▶ PipeWire capture ──▶ audio (16 kHz mono f32)
+                                   │                     │
+                                   ▼                     ▼
+                            (headset mic)         recognizer thread
+                                                    accumulate
+ PTT release ─▶ stop_active_capture ─▶ stop stream ─▶ end of utterance
+                                                         │
+                                                    one Whisper decode
+                                                         │
+                                                    per-session channel
+                                                         │
+                                                   render tick ─▶ panel ─▶ paste
+```
+
+- **`subsystem/whisper_pw_capture.rs`** — the PipeWire capture backend. Owns a
+  main loop on a dedicated thread; a `pipewire::channel` from any thread quits it
+  for an instant, allocation-free stop. Requests F32 mono at 16 kHz so the graph
+  does the resampling.
+- **`subsystem/whisper_stt.rs`** — session lifecycle and the recognizer. Each PTT
+  session gets a fresh transcription channel (a late decode from a previous
+  session cannot leak into the next), threads are reaped lazily off the UI thread,
+  and `ptt_start` waits for stream-open with a bounded timeout.
+- **Anti-hallucination** — a minimum voiced-duration gate before decoding, plus
+  `temperature 0`, `suppress_blank`, `suppress_nst`, `no_speech_thold`,
+  `single_segment`, and `no_context`.
+- **UI** — the panel clears on each press; the VU meter/progress reset on release,
+  not on a partial; Paste-and-Go uses Ctrl+Shift+V (terminals ignore plain
+  Ctrl+V).
+
+---
+
+## Testing
+
+Pure-logic unit tests run headless:
+
+```sh
+cargo test --release --all-features --bin wayvr
+```
+
+An end-to-end capture smoke test verifies that samples flow from a live source at
+the requested rate and that stop returns instantly (needs a running PipeWire graph
+and a live source):
+
+```sh
+WAYVR_PW_TARGET=wivrn.source \
+  cargo test --release --all-features --bin wayvr -- --ignored --nocapture pw_capture
+```
+
+---
+
+## Upstreaming
+
+The pipeline is language-neutral and self-contained; the fork changes are on
+`patch/whisper-lang-env` as focused, individually reviewable commits, intended to
+be portable back to `wayvr-org/wayvr`.
