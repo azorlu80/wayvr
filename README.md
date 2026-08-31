@@ -46,27 +46,46 @@ Build WayVR with the `whisper` feature (pulls in `pipewire` and
 cargo build --release --all-features
 ```
 
-Point WayVR at the headset microphone and your language. With WiVRn, set the
-environment in `~/.config/wivrn/config.json`:
+### Runtime prerequisites
 
-```json
-{
-  "application": [
-    "env",
-    "WAYVR_WHISPER_LANG=tr",
-    "WAYVR_WHISPER_SOURCE=wivrn.source",
-    "WAYVR_WHISPER_PROMPT=Yazılım geliştirici Türkçe sesli komut veriyor. Claude, terminal, kod, commit, refactor.",
-    "/path/to/target/release/wayvr"
-  ]
-}
+WayVR links `libopenvr_api.so` at load time even on the OpenXR path, so install
+the `openvr` package (Arch: `pacman -S openvr`) — otherwise the process aborts
+before `main()` with a bare `error while loading shared libraries`, invisible to
+WayVR's own logging. The Whisper model (`ggml-large-v3-turbo`) is loaded from
+WayVR's data directory, as upstream.
+
+### Launch from the WiVRn app launcher (recommended)
+
+WayVR is an OpenXR **overlay** — it runs *alongside* whatever else is streaming,
+so launch it on demand from the WiVRn *Applications* launcher rather than
+auto-starting it. Install a desktop entry that carries the Whisper environment
+and is tagged with the `X-WiVRn-VR` category so WiVRn lists it:
+
+```ini
+# ~/.local/share/applications/wayvr.desktop
+[Desktop Entry]
+Type=Application
+Name=WayVR
+Exec=env WAYVR_WHISPER_LANG=tr WAYVR_WHISPER_SOURCE=wivrn.source WAYVR_WHISPER_GPU=1 /path/to/target/release/wayvr
+Icon=wayvr
+Categories=Utility;X-WiVRn-VR;
 ```
+
+Leave the WiVRn config's `application` **unset** so connecting drops you into the
+launcher instead of force-starting one app. Copy `wayvr/wayvr.{png,svg}` into
+`~/.local/share/icons/hicolor/{128x128,scalable}/apps/` so the entry shows the
+WayVR icon.
+
+> **Why on-demand, not auto-launch?** The Whisper model stays resident on the
+> GPU while WayVR runs. On a single-GPU laptop that same GPU is encoding the
+> WiVRn video stream, so keeping WayVR up during a pure gaming session steals
+> encoder headroom and surfaces as periodic frame glitches. Launch WayVR when you
+> want to dictate; close it when you don't.
 
 Then in VR: open the Whisper panel, **hold** the transcribe button while
 speaking, **release**, and use **Paste-and-Go** to send the text to the focused
-window.
-
-> The Whisper model (`ggml-large-v3-turbo`) is loaded from WayVR's data
-> directory, as upstream.
+window — which also clears the panel, so the same utterance is never pasted
+twice.
 
 ---
 
@@ -112,9 +131,9 @@ All configuration is via environment variables — safe defaults, no code change
 - **Anti-hallucination** — a minimum voiced-duration gate before decoding, plus
   `temperature 0`, `suppress_blank`, `suppress_nst`, `no_speech_thold`,
   `single_segment`, and `no_context`.
-- **UI** — the panel clears on each press; the VU meter/progress reset on release,
-  not on a partial; Paste-and-Go uses Ctrl+Shift+V (terminals ignore plain
-  Ctrl+V).
+- **UI** — the panel clears on each press *and* after Paste-and-Go (so a sent
+  utterance can't be pasted twice); the VU meter/progress reset on release, not
+  on a partial; Paste-and-Go uses Ctrl+Shift+V (terminals ignore plain Ctrl+V).
 
 ---
 
