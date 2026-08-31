@@ -79,6 +79,20 @@ impl WhisperState {
     }
 }
 
+/// Clear the transcription from both the state and the on-panel label. Used on a
+/// fresh PTT press and after the text has been sent to a focused app, so a sent
+/// utterance never lingers on the panel to be pasted a second time (duplicates).
+fn clear_transcription(common: &mut CallbackDataCommon, state: &mut WhisperState) {
+    state.last_transcription = None;
+    if let Some(mut label) = common
+        .state
+        .widgets
+        .get_as::<WidgetLabel>(state.id_label_transcription)
+    {
+        label.set_text(common, Translation::from_raw_text_string(String::new()));
+    }
+}
+
 fn start_progress_state(
     common: &mut CallbackDataCommon,
     state: &WhisperState,
@@ -272,17 +286,7 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                             Ok(progress_rx) => {
                                 // Clear the panel so each press starts fresh and the
                                 // previous utterance never lingers under the new one.
-                                state.last_transcription = None;
-                                if let Some(mut label) = common
-                                    .state
-                                    .widgets
-                                    .get_as::<WidgetLabel>(state.id_label_transcription)
-                                {
-                                    label.set_text(
-                                        common,
-                                        Translation::from_raw_text_string(String::new()),
-                                    );
-                                }
+                                clear_transcription(common, state);
                                 start_progress_state(common, state, progress_rx);
                             }
                             Err(e) => log::error!("Could not start Whisper transcription: {e:?}"),
@@ -319,7 +323,7 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
 
                         Ok(EventResult::Consumed)
                     }),
-                    "::WhisperPasteAndGo" => Box::new(move |_common, data, app, state| {
+                    "::WhisperPasteAndGo" => Box::new(move |common, data, app, state| {
                         if !test_button(data) || !test_duration(&button, app) {
                             return Ok(EventResult::Pass);
                         }
@@ -358,6 +362,10 @@ pub fn create_whisper(app: &mut AppState) -> anyhow::Result<OverlayWindowConfig>
                                 VirtualKey::RCtrl,
                                 false,
                             );
+
+                            // Sent to the focused app — clear the panel so the same
+                            // utterance can't be pasted again by a second press.
+                            clear_transcription(common, state);
                         }
 
                         Ok(EventResult::Consumed)
